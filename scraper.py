@@ -34,12 +34,16 @@ from urllib.parse import urlparse, urlencode
 import requests
 from dotenv import load_dotenv
 from exa_py import Exa
-from requests_oauthlib import OAuth1
 
 try:
     from firecrawl import Firecrawl
 except ImportError:
     from firecrawl import FirecrawlApp as Firecrawl  # type: ignore
+
+load_dotenv()
+
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "")
+X_HEADERS = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
 
 
 # ─── Search Engine Routing ───────────────────────────────────────────────────
@@ -340,12 +344,11 @@ def search_brave(
 # ─── X API — real-time social intent ─────────────────────────────────────────
 
 def search_x(
-    auth: OAuth1,
     category: str,
     queries: list[str],
 ) -> list[dict[str, Any]]:
     """
-    X API for real-time intent signals — completely FREE with OAuth1.
+    X API for real-time intent signals using bearer token auth.
     Best source for catching the moment someone publicly expresses
     buying intent, frustration, or tool evaluation.
     No Firecrawl needed — tweet text IS the signal.
@@ -356,7 +359,7 @@ def search_x(
         try:
             r = requests.get(
                 "https://api.twitter.com/2/tweets/search/recent",
-                auth=auth,
+                headers=X_HEADERS,
                 params={
                     "query": query,
                     "max_results": 10,
@@ -408,7 +411,6 @@ def collect_signals(
     exa: Exa,
     firecrawl: Any,
     brave_key: str,
-    x_auth: OAuth1,
     num_results: int,
     days_back: int,
 ) -> list[dict[str, Any]]:
@@ -425,7 +427,7 @@ def collect_signals(
 
     # X: real-time social intent
     for category, queries in X_QUERIES.items():
-        all_items.extend(search_x(x_auth, category, queries))
+        all_items.extend(search_x(category, queries))
 
     # Deduplicate
     deduped: list[dict[str, Any]] = []
@@ -475,26 +477,21 @@ def save_feed(run_date: str, payload: dict[str, Any]) -> Path:
     return out_path
 
 
-def build_clients() -> tuple[Exa, Any, str, OAuth1]:
+def build_clients() -> tuple[Exa, Any, str]:
     exa_key       = os.getenv("EXA_API_KEY", "").strip()
     firecrawl_key = os.getenv("FIRECRAWL_API_KEY", "").strip()
     brave_key     = os.getenv("BRAVE_API_KEY", "").strip()
-    x_consumer_key        = os.getenv("X_CONSUMER_KEY", "").strip()
-    x_consumer_secret     = os.getenv("X_CONSUMER_SECRET", "").strip()
-    x_access_token        = os.getenv("X_ACCESS_TOKEN", "").strip()
-    x_access_token_secret = os.getenv("X_ACCESS_TOKEN_SECRET", "").strip()
 
     if not exa_key:       raise SystemExit("EXA_API_KEY is required.")
     if not firecrawl_key: raise SystemExit("FIRECRAWL_API_KEY is required.")
     if not brave_key:     raise SystemExit("BRAVE_API_KEY is required.")
-    if not all([x_consumer_key, x_consumer_secret, x_access_token, x_access_token_secret]):
-        raise SystemExit("X API credentials are required (X_CONSUMER_KEY, X_CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET).")
+    if not X_BEARER_TOKEN:
+        raise SystemExit("X_BEARER_TOKEN is required.")
 
     exa       = Exa(api_key=exa_key)
     firecrawl = Firecrawl(api_key=firecrawl_key)
-    x_auth    = OAuth1(x_consumer_key, x_consumer_secret, x_access_token, x_access_token_secret)
 
-    return exa, firecrawl, brave_key, x_auth
+    return exa, firecrawl, brave_key
 
 
 def parse_args() -> argparse.Namespace:
@@ -507,15 +504,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    load_dotenv()
     args = parse_args()
-    exa, firecrawl, brave_key, x_auth = build_clients()
+    exa, firecrawl, brave_key = build_clients()
 
     items = collect_signals(
         exa=exa,
         firecrawl=firecrawl,
         brave_key=brave_key,
-        x_auth=x_auth,
         num_results=args.num_results,
         days_back=args.days_back,
     )
