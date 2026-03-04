@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -303,6 +304,10 @@ def decode_payment_required_header(value: str) -> dict[str, Any] | None:
     except Exception:
         return None
     return None
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class PaymentInstructionBodyMiddleware(BaseHTTPMiddleware):
