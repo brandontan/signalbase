@@ -1,6 +1,0 @@
-fastapi
-uvicorn[standard]
-exa-py
-firecrawl-py
-x402[fastapi,evm]
-python-dotenv
