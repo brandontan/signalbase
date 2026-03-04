@@ -205,7 +205,7 @@ app = FastAPI(
     description="Paid web intelligence feed for AI agents using x402 USDC payments.",
     docs_url=None if IS_PRODUCTION else "/docs",
     redoc_url=None if IS_PRODUCTION else "/redoc",
-    openapi_url=None if IS_PRODUCTION else "/openapi.json",
+    openapi_url="/openapi.json",  # Always on — agents need this for discovery
 )
 
 app.add_middleware(
