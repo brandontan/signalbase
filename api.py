@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import subprocess
@@ -20,7 +21,8 @@ from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.server import x402ResourceServer
 
-load_dotenv(override=True)
+_is_railway = bool(os.getenv("RAILWAY_ENVIRONMENT_NAME", ""))
+load_dotenv(override=not _is_railway)  # Never override Railway env vars
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
@@ -30,6 +32,12 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 PAY_TO_ADDRESS = os.getenv("PAY_TO_ADDRESS", "").strip() or ZERO_ADDRESS
 X402_NETWORK = os.getenv("X402_NETWORK", "eip155:8453").strip()
 IS_PRODUCTION = os.getenv("RAILWAY_ENVIRONMENT_NAME", "").strip().lower() == "production"
+
+if IS_PRODUCTION and PAY_TO_ADDRESS == ZERO_ADDRESS:
+    raise RuntimeError(
+        "PAY_TO_ADDRESS is zero/unset in production — payments would burn. "
+        "Set PAY_TO_ADDRESS in Railway env vars before deploying."
+    )
 
 # CDP facilitator auth (Coinbase Developer Platform)
 CDP_API_KEY_ID = os.getenv("CDP_API_KEY_ID", "").strip()
@@ -678,6 +686,9 @@ async def get_preview_category(
     return preview_response(feed=feed, category=category_id, items=items, limit=limit, extra=extra)
 
 
+_scraper_lock = threading.Lock()
+
+
 @app.post("/cron/scrape")
 async def trigger_scrape(
     authorization: str | None = Header(default=None, alias="Authorization"),
@@ -691,11 +702,17 @@ async def trigger_scrape(
         if scheme.lower() == "bearer" and value.strip():
             token = value.strip()
 
-    if token != CRON_SECRET:
+    if not token or not hmac.compare_digest(token, CRON_SECRET):
         raise HTTPException(status_code=403, detail="Invalid secret")
 
+    if not _scraper_lock.acquire(blocking=False):
+        return {"status": "already_running", "message": "Scraper is already in progress"}
+
     def run_scraper():
-        subprocess.run(["python3", "scraper.py"], cwd=str(ROOT))
+        try:
+            subprocess.run(["python3", "scraper.py"], cwd=str(ROOT))
+        finally:
+            _scraper_lock.release()
 
     thread = threading.Thread(target=run_scraper, daemon=True)
     thread.start()

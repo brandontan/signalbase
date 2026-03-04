@@ -45,7 +45,8 @@ try:
 except ImportError:
     from firecrawl import FirecrawlApp as Firecrawl  # type: ignore
 
-load_dotenv(override=True)
+_is_railway = bool(os.getenv("RAILWAY_ENVIRONMENT_NAME", ""))
+load_dotenv(override=not _is_railway)  # Never override Railway env vars
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
