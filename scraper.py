@@ -2,21 +2,23 @@
 Signalbase — Daily Intelligence Scraper
 Each tool used to its strength:
 
-  X API      → real-time social intent signals (FREE)
-               best for: people complaining, asking for alternatives RIGHT NOW
-  Brave      → keyword news search (FREE tier: 2000/month, then $0.003/query)
-               best for: funding news, product launches, pricing changes
-  Exa        → semantic/neural search ($0.003/search + $0.001/result)
-               best for: intent-based conceptual queries, Reddit/HN threads
-  Firecrawl  → URL content extraction ($0.0053/page) — FALLBACK ONLY
-               fires only when Exa/Brave return thin content (<200 chars)
+  X API      → real-time social intent signals ($200/mo Basic tier)
+               best for: buying intent, tool evaluation, frustration RIGHT NOW
+               uses context: operator for topic filtering
+  Brave      → keyword news search (Search tier: extra_snippets + news)
+               best for: funding news, product launches, pricing changes, competitor events
+  Exa        → semantic/neural search (free tier: 1000 req/mo)
+               best for: conceptual queries, emerging trends, protocol news
+               queries are statement-style with autoprompt + category filter
+  Firecrawl  → search + scrape (free tier: 500 credits/mo)
+               dual role: supplemental search for weak categories + thin-content enricher
 
 Daily cost estimate:
-  Exa:        4 queries × 5 results = 20 results → ~$0.032/day
-  Brave:      8 queries             → FREE (under 2000/month limit)
-  X API:      4 queries             → FREE
-  Firecrawl:  ~10 fallback scrapes  → ~$0.053/day
-  TOTAL:      ~$0.085/day = $2.55/month
+  Exa:        6 queries × 5 results = 30 results → free tier
+  Brave:      13 queries + news     → Search tier (within limits)
+  X API:      6 queries             → Basic tier ($200/mo fixed)
+  Firecrawl:  4 search queries + ~10 enrichment scrapes → ~18 credits/day
+  TOTAL:      ~$6.67/day ($200/mo X) + free tiers for the rest
 """
 
 from __future__ import annotations
@@ -62,40 +64,71 @@ logger = logging.getLogger("signalbase.scraper")
 # Which tool handles which category and why
 
 # EXA: semantic/neural — finds content by MEANING not keywords
-# Best for intent queries where concept matters more than exact words
+# Exa docs: queries should be STATEMENTS, not keywords.
+# "Here is a great article about X:" outperforms "X keyword keyword"
+# use_autoprompt=True lets Exa rewrite for best results
+# category="news" filters to news articles only
+# excludeText kills listicles before they enter the pipeline
 EXA_QUERIES: dict[str, list[str]] = {
     "market_trend": [
-        "x402 protocol HTTP micropayments AI agent economy 2026",
-        "MCP server marketplace agent-to-agent data transactions emerging",
+        "Here is a recent article about the x402 protocol enabling AI agent micropayments:",
+        "Here is an article about MCP servers and the emerging agent-to-agent data marketplace:",
+        "Here is a news article about a new AI infrastructure trend gaining traction in 2026:",
     ],
     "developer_signal": [
-        "new AI model released open weights developer tools 2026",
-        "agent framework trending GitHub launch open source 2026",
+        "Here is a news article about a newly released open-weights AI model:",
+        "Here is an article about an AI agent framework that just launched on GitHub:",
+        "Here is a blog post announcing a new developer tool for building AI agents:",
     ],
 }
+
+# Exa listicle patterns to exclude via excludeText parameter
+EXA_EXCLUDE_PATTERNS = [
+    "top 5", "top 10", "top 20", "best tools", "complete guide",
+    "how to get started", "beginner's guide", "comparison of",
+]
 
 # BRAVE: keyword news search — best for recent news, announcements, factual events
 # Cheaper than Exa for keyword searches, fresher for news
 BRAVE_QUERIES: dict[str, list[str]] = {
     "company_intel": [
-        "AI agent startup funding round raised 2026",
-        "autonomous agent platform launch developer tools 2026",
-        "agentic AI company hiring engineers 2026",
-        "AI infrastructure startup new product release 2026",
+        '"raised" OR "raises" AI startup funding 2026',
+        '"launched" OR "announces" AI agent platform 2026',
+        '"hiring" AI engineers company expanding 2026',
+        '"new product" OR "new feature" AI infrastructure 2026',
     ],
     "competitor_news": [
-        "AI data API pricing change developer reaction 2026",
-        "agent tooling platform acquisition merger 2026",
-        "AI API provider outage migration alternative 2026",
-        "LLM data provider new competitor launch 2026",
+        '"outage" OR "downtime" AI API platform 2026',
+        '"acquired" OR "acquires" OR "acquisition" AI data company 2026',
+        '"price increase" OR "pricing change" AI API SaaS 2026',
+        '"launches" OR "launched" competitor AI data API agent 2026',
+        '"shutting down" OR "deprecated" OR "end of life" AI API 2026',
     ],
     "funding_signal": [
-        "AI startup raised seed series funding announced 2026",
-        "machine learning company investment round closed 2026",
+        '"raises" OR "raised" OR "secures" seed series AI startup 2026',
+        '"funding round" OR "investment" AI machine learning announced 2026',
     ],
     "hiring_signal": [
-        "AI company hiring engineers expanding team 2026",
-        "LLM agent infrastructure team new roles 2026",
+        '"hiring" OR "open roles" AI engineer startup 2026',
+        '"head of" OR "VP of" AI engineering new hire 2026',
+    ],
+    "pricing_intel": [
+        '"price increase" OR "pricing change" OR "new pricing" AI API SaaS 2026',
+        '"billing update" OR "plan change" OR "free tier" AI tool developer 2026',
+    ],
+}
+
+# FIRECRAWL SEARCH: web search + scraping in one call
+# 2 credits per 10 results, 500 free credits/month = ~8 queries/day budget
+# Use sparingly for categories where Brave/Exa underperform
+FIRECRAWL_QUERIES: dict[str, list[str]] = {
+    "competitor_news": [
+        "AI API company outage downtime incident report 2026",
+        "AI startup acquired acquisition 2026",
+    ],
+    "pricing_intel": [
+        "AI API pricing change increase 2026",
+        "SaaS AI tool new pricing plan announced 2026",
     ],
 }
 
@@ -114,8 +147,9 @@ X_QUERIES: dict[str, list[str]] = {
     ],
 }
 
-# Intent scoring weights — higher = stronger buying signal
+# Intent scoring weights — higher = stronger signal
 INTENT_KEYWORDS: dict[str, int] = {
+    # Buying intent (lead_signal)
     "looking for": 3,
     "anyone recommend": 4,
     "anyone know": 4,
@@ -129,31 +163,64 @@ INTENT_KEYWORDS: dict[str, int] = {
     "real-time data": 3,
     "integrate": 2,
     "pipeline": 2,
-    "feed": 2,
     "api for": 3,
     "switching from": 4,
     "alternative to": 4,
-    "comparing": 3,
     "too expensive": 3,
     "evaluating": 3,
-    "vendor": 2,
     "data provider": 3,
-    "who provides": 3,
-    "pricing page": 2,
-    "free trial": 2,
-    "demo": 2,
-    "onboarding": 2,
-    "we're hiring": 2,
+    # Funding events
     "just raised": 4,
+    "raises $": 5,
+    "raised $": 5,
+    "million": 3,
     "series a": 4,
     "series b": 4,
+    "series c": 4,
     "seed round": 4,
-    "launched": 2,
-    "shipped": 2,
-    "new product": 2,
-    "acquired": 3,
-    "pricing change": 3,
+    "pre-seed": 3,
+    "funding round": 3,
+    "led by": 2,
+    # Hiring events
+    "we're hiring": 3,
+    "hiring": 2,
+    "open roles": 3,
+    "head of engineering": 4,
+    "vp of": 3,
+    "new hire": 3,
+    # Competitor events (high-value signals)
+    "acquired": 4,
+    "acquires": 4,
+    "acquisition": 4,
+    "outage": 5,
+    "downtime": 4,
+    "incident": 3,
+    "shutting down": 5,
+    "deprecated": 4,
+    "end of life": 4,
+    "price increase": 4,
+    "pricing change": 4,
+    "billing change": 3,
+    # Product events
+    "launched": 3,
+    "launches": 3,
+    "shipped": 3,
+    "announces": 3,
+    "now available": 3,
+    "new product": 3,
+    "new feature": 3,
+    "open source": 2,
+    "open-source": 2,
 }
+
+# Listicle/guide patterns that indicate low-value content — penalize these
+LISTICLE_PENALTIES: list[str] = [
+    "top 5 ", "top 10 ", "top 20 ", "top 50 ",
+    "best ", "complete guide", "how to ",
+    "comparison)", "compared", "reviews |",
+    "leaderboard", "rankings", "tier list",
+    "tips for ", "things to know",
+]
 
 COMPANY_SIGNAL_KEYWORDS: dict[str, list[str]] = {
     "funding":      ["funding", "series a", "series b", "seed round", "raised", "investment"],
@@ -242,16 +309,19 @@ def score_intent(
         "company_intel": 1,
         "competitor_news": 1,
     }
-    score = base_by_category.get(category, 7)
+    score = base_by_category.get(category, 1)
     for keyword, weight in INTENT_KEYWORDS.items():
         if keyword in normalized:
             score += weight
     if source_engine == "x":
         score += 1
     score += max(0, engagement_boost)
-    # Lead signals with engagement are higher quality (others noticed the need too)
+    # Lead signals with engagement are higher quality
     if category == "lead_signal" and engagement_boost >= 2:
         score += 1
+    # Penalize listicles and guides — they look relevant but aren't actionable
+    if any(pattern in normalized for pattern in LISTICLE_PENALTIES):
+        score -= 3
     return max(1, min(score, 10))
 
 
@@ -440,6 +510,92 @@ def enrich_if_thin(firecrawl: Any, text: str, url: str, threshold: int = 200) ->
     return enriched if enriched else text
 
 
+# ─── Firecrawl — search + scrape (supplemental) ─────────────────────────────
+
+def search_firecrawl(
+    firecrawl_client: Any,
+    category: str,
+    queries: list[str],
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """
+    Firecrawl v2 /search: web search + inline page scraping in one call.
+    With scrape_options, returns Document objects with full markdown content
+    and rich metadata (title, published_time, etc.) — far richer than
+    Brave snippets or Exa text excerpts.
+
+    Key params:
+      - scrape_options: ScrapeOptions(formats=['markdown'], only_main_content=True)
+        gives us scraped page content inline (no separate scrape call needed)
+      - tbs='qdr:w' restricts to past week (same as Brave's freshness=pw)
+      - limit=5 keeps credit usage tight (2 credits per 10 results)
+
+    Budget: ~4 queries/day × 5 results = ~4 credits/day = 120/month (well within 500)
+    """
+    from firecrawl.v2.types import ScrapeOptions
+
+    items = []
+
+    for query in queries:
+        try:
+            response = firecrawl_client.search(
+                query=query,
+                limit=limit,
+                tbs="qdr:w",                  # past week freshness
+                scrape_options=ScrapeOptions(
+                    formats=["markdown"],
+                    only_main_content=True,    # skip nav, footers, ads
+                    block_ads=True,            # cleaner markdown
+                    exclude_tags=["nav", "footer", "aside", "header"],  # strip layout noise
+                    remove_base64_images=True,  # lighter response payload
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Firecrawl search failed query=%r error=%s", query, exc)
+            continue
+
+        # With scrape_options, results come back as Document objects in .web
+        results = response.web or [] if hasattr(response, "web") else []
+
+        for result in results:
+            # Document objects have .metadata with url/title/published_time
+            meta = getattr(result, "metadata", None)
+            if meta:
+                url = getattr(meta, "url", "") or getattr(meta, "source_url", "") or ""
+                title = getattr(meta, "title", "") or getattr(meta, "og_title", "") or ""
+                published = getattr(meta, "published_time", None) or getattr(meta, "dc_date", None)
+            else:
+                url = getattr(result, "url", "")
+                title = getattr(result, "title", "") or ""
+                published = None
+
+            # Markdown content from scraped page
+            text = getattr(result, "markdown", "") or ""
+            # Fallback to description if no markdown
+            if not text and meta:
+                text = getattr(meta, "description", "") or getattr(meta, "og_description", "") or ""
+
+            if not url or not text:
+                continue
+
+            # Truncate markdown — we only need enough for scoring and excerpts
+            text = text[:2500]
+
+            items.append(build_signal_item(
+                category=category,
+                query=query,
+                url=url,
+                title=title,
+                text=text,
+                published_at=published,
+                source_engine="firecrawl",
+            ))
+
+        time.sleep(0.3)  # Rate limit respect
+
+    return items
+
+
 # ─── Exa — semantic/neural search ────────────────────────────────────────────
 
 def search_exa(
@@ -452,8 +608,11 @@ def search_exa(
 ) -> list[dict[str, Any]]:
     """
     Exa shines for semantic intent queries.
-    num_results=5 (not 8) — saves $0.003 per result, same quality.
-    contents=text fetched inline to avoid separate API calls.
+    Optimized per Exa docs:
+      - Queries are natural-language statements, not keyword soup
+      - use_autoprompt=True lets Exa rewrite queries for best retrieval
+      - category="news" filters to news articles (skips forums, docs, etc.)
+      - excludeText kills listicles before they enter our pipeline
     """
     since = (date.today() - timedelta(days=days_back)).isoformat()
     items = []
@@ -464,8 +623,20 @@ def search_exa(
                 query,
                 num_results=num_results,
                 start_published_date=since,
-                type="neural",          # semantic matching — Exa's real strength
-                contents={"text": {"maxCharacters": 800}},
+                type="auto",               # let Exa pick neural vs keyword
+                use_autoprompt=True,        # Exa rewrites query for best results
+                category="news",            # news articles only
+                exclude_text=EXA_EXCLUDE_PATTERNS,  # kill listicles at source
+                contents={
+                    "text": {"maxCharacters": 1200},
+                    "highlights": {           # query-biased key sentences
+                        "query": query,
+                        "maxCharacters": 500,
+                    },
+                    "summary": {              # Exa-generated summary biased to query
+                        "query": query,
+                    },
+                },
             )
         except Exception:
             try:
@@ -481,9 +652,21 @@ def search_exa(
         for item in raw:
             url   = str(extract_value(item, "url") or "").strip()
             title = str(extract_value(item, "title") or "").strip()
-            text  = str(
-                extract_value(item, "text", "content", "summary") or ""
-            ).strip()
+
+            # Build richest possible text: summary > highlights > raw text
+            exa_summary = str(extract_value(item, "summary") or "").strip()
+            exa_highlights = extract_value(item, "highlights") or []
+            exa_text = str(extract_value(item, "text", "content") or "").strip()
+
+            # Combine: summary first (most useful), then highlights, then raw
+            parts = []
+            if exa_summary:
+                parts.append(exa_summary)
+            if exa_highlights:
+                parts.append(" ".join(str(h) for h in exa_highlights))
+            if exa_text:
+                parts.append(exa_text)
+            text = " ".join(parts).strip()
 
             if not url:
                 continue
@@ -514,9 +697,11 @@ def search_brave(
     queries: list[str],
 ) -> list[dict[str, Any]]:
     """
-    Brave Search API for keyword/news queries.
-    FREE up to 2000 queries/month — use for all news-style searches.
-    Fresher than Exa for recent announcements and press releases.
+    Brave Search API (Search tier) for keyword/news queries.
+    Search tier gives extra_snippets (4 per result) — much richer content
+    than Base tier's single description. We concatenate all snippets
+    for better intent scoring and content excerpts.
+    extra_snippets=true requires Search subscription key.
     """
     items = []
 
@@ -529,7 +714,14 @@ def search_brave(
                     "Accept-Encoding": "gzip",
                     "X-Subscription-Token": brave_key,
                 },
-                params={"q": query, "count": 8, "freshness": "pw"},  # pw = past week
+                params={
+                    "q": query,
+                    "count": 10,                       # was 8, max is 20 but 10 is quality sweet spot
+                    "freshness": "pw",                 # past week
+                    "extra_snippets": "true",          # Search tier: 4 extra snippets per result
+                    "result_filter": "web,news,discussions",  # include forums/Reddit threads
+                    "text_decorations": "false",       # cleaner text without <b> tags
+                },
                 timeout=15,
             )
         except Exception as exc:
@@ -546,23 +738,79 @@ def search_brave(
             continue
 
         try:
-            results = r.json().get("web", {}).get("results", [])
+            data = r.json()
+            results = data.get("web", {}).get("results", [])
+            # Also pull from news + discussion results if available
+            news_results = data.get("news", {}).get("results", [])
+            discussions = data.get("discussions", {}).get("results", [])
         except Exception as exc:
             logger.warning("Brave JSON parse failed query=%r error=%s", query, exc)
             continue
 
-        if not results:
+        if not results and not news_results and not discussions:
             logger.info("Brave query returned 0 results query=%r", query)
 
+        # Process web results with extra_snippets
         for result in results:
             url   = result.get("url", "")
             title = result.get("title", "")
-            text  = result.get("description", "") or result.get("extra_snippets", [""])[0]
+            # Combine description + extra_snippets for richer content
+            description = result.get("description", "")
+            extra = result.get("extra_snippets", [])
+            if extra:
+                text = description + " " + " ".join(extra)
+            else:
+                text = description
 
             if not url:
                 continue
 
             text = enrich_if_thin(firecrawl, text, url, threshold=150)
+            if not text:
+                continue
+
+            items.append(build_signal_item(
+                category=category,
+                query=query,
+                url=url,
+                title=title,
+                text=text,
+                published_at=result.get("age"),
+                source_engine="brave",
+            ))
+
+        # Process news results (often fresher, more event-focused)
+        for result in news_results:
+            url   = result.get("url", "")
+            title = result.get("title", "")
+            text  = result.get("description", "")
+
+            if not url:
+                continue
+
+            text = enrich_if_thin(firecrawl, text, url, threshold=150)
+            if not text:
+                continue
+
+            items.append(build_signal_item(
+                category=category,
+                query=query,
+                url=url,
+                title=title,
+                text=text,
+                published_at=result.get("age"),
+                source_engine="brave",
+            ))
+
+        # Process discussion results (Reddit, HN, forums — real user opinions)
+        for result in discussions:
+            url   = result.get("url", "")
+            title = result.get("title", "")
+            text  = result.get("description", "")
+
+            if not url:
+                continue
+
             if not text:
                 continue
 
@@ -588,10 +836,12 @@ def search_x(
     queries: list[str],
 ) -> list[dict[str, Any]]:
     """
-    X API for real-time intent signals using bearer token auth.
-    Best source for catching the moment someone publicly expresses
-    buying intent, frustration, or tool evaluation.
-    No Firecrawl needed — tweet text IS the signal.
+    X API v2 for real-time intent signals using bearer token auth.
+    Maximized fields:
+      - context_annotations: X's own topic/entity tags per tweet
+      - expansions=author_id + user.fields: author username, follower count, bio
+      - entities: structured URLs, mentions, hashtags from tweet text
+    Author follower count feeds into engagement_boost for better scoring.
     """
     items = []
     lead_quality_terms = [
@@ -615,7 +865,9 @@ def search_x(
                 params={
                     "query": query,
                     "max_results": 10,
-                    "tweet.fields": "text,public_metrics,created_at,author_id",
+                    "tweet.fields": "text,public_metrics,created_at,author_id,context_annotations,entities",
+                    "expansions": "author_id",
+                    "user.fields": "username,public_metrics,description,verified",
                 },
                 timeout=15,
             )
@@ -633,7 +885,12 @@ def search_x(
             continue
 
         try:
-            tweets = r.json().get("data", [])
+            resp_json = r.json()
+            tweets = resp_json.get("data", [])
+            # Build author lookup from includes
+            users_by_id = {}
+            for user in (resp_json.get("includes", {}).get("users", [])):
+                users_by_id[user["id"]] = user
         except Exception as exc:
             logger.warning("X JSON parse failed query=%r error=%s", query, exc)
             continue
@@ -654,18 +911,58 @@ def search_x(
             tweet_url = f"https://x.com/i/web/status/{tweet['id']}"
             likes = int(metrics.get("like_count", 0) or 0)
             retweets = int(metrics.get("retweet_count", 0) or 0)
-            engagement_boost = 1 if (likes + retweets > 5) else 0
+            replies = int(metrics.get("reply_count", 0) or 0)
+
+            # Author data from expansion
+            author = users_by_id.get(tweet.get("author_id", ""), {})
+            author_username = author.get("username", "")
+            author_followers = int(
+                (author.get("public_metrics", {}) or {}).get("followers_count", 0) or 0
+            )
+            author_bio = author.get("description", "")
+
+            # Engagement boost: factor in author reach + tweet engagement
+            raw_engagement = likes + retweets + replies
+            follower_boost = 1 if author_followers >= 1000 else 0
+            high_reach_boost = 1 if author_followers >= 10000 else 0
+            engagement_boost = (
+                (1 if raw_engagement > 5 else 0)
+                + follower_boost
+                + high_reach_boost
+            )
+
+            # Enrich text with author context for better scoring
+            enriched_text = text
+            if author_bio:
+                enriched_text = f"{text} [author: @{author_username} — {author_bio}]"
+
+            # Extract context_annotations for signal metadata
+            ctx_annotations = tweet.get("context_annotations", [])
+            topics = [
+                a.get("entity", {}).get("name", "")
+                for a in ctx_annotations
+                if a.get("entity", {}).get("name")
+            ]
 
             signal = build_signal_item(
                 category=category,
                 query=query,
                 url=tweet_url,
                 title=text[:80],
-                text=text,
+                text=enriched_text,
                 published_at=tweet.get("created_at"),
                 source_engine="x",
                 engagement_boost=engagement_boost,
             )
+
+            # Add X-specific metadata
+            if author_username:
+                signal["author"] = {
+                    "username": author_username,
+                    "followers": author_followers,
+                }
+            if topics:
+                signal["x_topics"] = topics[:5]  # keep top 5 topic annotations
 
             if category == "lead_signal":
                 lower_text = text.lower()
@@ -696,24 +993,34 @@ def collect_signals(
     all_items: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    # Exa: semantic intent queries
+    # Exa: semantic intent queries (statement-style, autoprompt, category filter)
     for category, queries in EXA_QUERIES.items():
         all_items.extend(search_exa(exa, firecrawl, category, queries, num_results, days_back))
 
-    # Brave: keyword news queries
+    # Brave: keyword news queries (Search tier with extra_snippets)
     for category, queries in BRAVE_QUERIES.items():
         all_items.extend(search_brave(brave_key, firecrawl, category, queries))
+
+    # Firecrawl: supplemental search + scrape (richer content for weak categories)
+    for category, queries in FIRECRAWL_QUERIES.items():
+        all_items.extend(search_firecrawl(firecrawl, category, queries))
 
     # X: real-time social intent
     for category, queries in X_QUERIES.items():
         all_items.extend(search_x(category, queries))
 
-    # Deduplicate
+    # Deduplicate + quality floor (drop score < 2)
     deduped: list[dict[str, Any]] = []
+    dropped = 0
     for item in all_items:
         if item["id"] not in seen:
             seen.add(item["id"])
+            if int(item.get("intent_score") or 0) < 2:
+                dropped += 1
+                continue
             deduped.append(item)
+    if dropped:
+        logger.info("Quality floor dropped %d items with score < 2", dropped)
 
     # Sort: lead signals first, then by intent score desc
     deduped.sort(key=lambda r: (
@@ -726,7 +1033,10 @@ def collect_signals(
 
 
 def build_feed_payload(run_date: str, items: list[dict[str, Any]]) -> dict[str, Any]:
-    all_categories = list(EXA_QUERIES.keys()) + list(BRAVE_QUERIES.keys())
+    all_categories = list(set(
+        list(EXA_QUERIES.keys()) + list(BRAVE_QUERIES.keys()) +
+        list(FIRECRAWL_QUERIES.keys()) + list(X_QUERIES.keys())
+    ))
     counts = {cat: 0 for cat in all_categories}
     engine_counts: dict[str, int] = {}
 
