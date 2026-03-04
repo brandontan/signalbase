@@ -50,14 +50,14 @@ else:
     _FACILITATOR_AUTH = None
 
 PRICING: dict[str, str] = {
-    "GET /feed": "$0.01",
-    "GET /leads": "$0.005",
-    "GET /companies": "$0.005",
-    "GET /competitors": "$0.003",
-    "GET /market": "$0.003",
-    "GET /funding": "$0.003",
-    "GET /hiring": "$0.003",
-    "GET /developer": "$0.003",
+    "GET /feed": "$0.10",
+    "GET /leads": "$0.05",
+    "GET /companies": "$0.05",
+    "GET /competitors": "$0.03",
+    "GET /market": "$0.03",
+    "GET /funding": "$0.03",
+    "GET /hiring": "$0.03",
+    "GET /developer": "$0.03",
 }
 
 DATA_CATALOG: list[dict[str, Any]] = [
@@ -221,42 +221,42 @@ def payment_option(price: str) -> PaymentOption:
 
 PAID_ROUTES: dict[str, RouteConfig] = {
     "GET /feed": RouteConfig(
-        accepts=[payment_option("$0.01")],
+        accepts=[payment_option("$0.10")],
         mime_type="application/json",
         description="Full daily Signalbase feed.",
     ),
     "GET /leads": RouteConfig(
-        accepts=[payment_option("$0.005")],
+        accepts=[payment_option("$0.05")],
         mime_type="application/json",
         description="Lead signals sorted by intent score.",
     ),
     "GET /companies": RouteConfig(
-        accepts=[payment_option("$0.005")],
+        accepts=[payment_option("$0.05")],
         mime_type="application/json",
         description="Company intelligence feed with optional signal type filter.",
     ),
     "GET /competitors": RouteConfig(
-        accepts=[payment_option("$0.003")],
+        accepts=[payment_option("$0.03")],
         mime_type="application/json",
         description="Competitor news feed.",
     ),
     "GET /market": RouteConfig(
-        accepts=[payment_option("$0.003")],
+        accepts=[payment_option("$0.03")],
         mime_type="application/json",
         description="Market trend feed.",
     ),
     "GET /funding": RouteConfig(
-        accepts=[payment_option("$0.003")],
+        accepts=[payment_option("$0.03")],
         mime_type="application/json",
         description="Funding signal feed.",
     ),
     "GET /hiring": RouteConfig(
-        accepts=[payment_option("$0.003")],
+        accepts=[payment_option("$0.03")],
         mime_type="application/json",
         description="Hiring signal feed.",
     ),
     "GET /developer": RouteConfig(
-        accepts=[payment_option("$0.003")],
+        accepts=[payment_option("$0.03")],
         mime_type="application/json",
         description="Developer signal feed.",
     ),

@@ -73,14 +73,14 @@ Preview endpoints return compact items (10 fields). Paid endpoints return everyt
 
 | Endpoint | Price |
 |---|---|
-| `GET /feed` | $0.01 |
-| `GET /leads` | $0.005 |
-| `GET /companies` | $0.005 |
-| `GET /competitors` | $0.003 |
-| `GET /market` | $0.003 |
-| `GET /funding` | $0.003 |
-| `GET /hiring` | $0.003 |
-| `GET /developer` | $0.003 |
+| `GET /feed` | $0.10 |
+| `GET /leads` | $0.05 |
+| `GET /companies` | $0.05 |
+| `GET /competitors` | $0.03 |
+| `GET /market` | $0.03 |
+| `GET /funding` | $0.03 |
+| `GET /hiring` | $0.03 |
+| `GET /developer` | $0.03 |
 
 Free endpoints: `/health`, `/preview/*`, `/openapi.json`, `/docs`
 
