@@ -18,7 +18,8 @@ Daily cost estimate:
   Brave:      13 queries + news     → Search tier (within limits)
   X API:      6 queries             → Basic tier ($200/mo fixed)
   Firecrawl:  4 search queries + ~10 enrichment scrapes → ~18 credits/day
-  TOTAL:      ~$6.67/day ($200/mo X) + free tiers for the rest
+  OpenRouter: ~70 items × LLM classify  → ~$0.004/day (GPT-4o-mini via OpenRouter)
+  TOTAL:      ~$6.67/day ($200/mo X) + free tiers + ~$0.12/mo LLM classifier
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlencode
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -136,10 +137,14 @@ FIRECRAWL_QUERIES: dict[str, list[str]] = {
 # Best for catching buying intent the moment someone expresses it publicly
 X_QUERIES: dict[str, list[str]] = {
     "lead_signal": [
-        '"need an API" OR "need a data" OR "looking for an API" OR "looking for a data" context:131.848920371311001600 -is:retweet lang:en',
-        '"recommend" (API OR SaaS OR SDK OR tool) context:131.848920371311001600 -is:retweet lang:en',
-        '"sell to AI" OR "sell to agents" OR "API for agents" OR "data for agents" -is:retweet lang:en',
-        '"integrate" OR "integration" (API OR data OR agent) context:131.848920371311001600 -is:retweet lang:en',
+        # Buying intent within Business & Tech context
+        # context:131 = Technology domain, context:66 = Business & Finance domain
+        '"anyone recommend" OR "can anyone recommend" (tool OR software OR platform OR service) context:131.848920371311001600 -is:retweet lang:en',
+        '"looking for a" (tool OR software OR platform OR service OR solution OR vendor) context:131.848920371311001600 -is:retweet lang:en',
+        '"switching from" OR "alternative to" OR "replacing" context:131.848920371311001600 -is:retweet lang:en',
+        '"anyone recommend" OR "looking for" (tool OR software OR service OR agency) context:66.848921413196984320 -is:retweet lang:en',
+        '"need help with" OR "struggling with" (automation OR workflow OR integration OR process) -is:retweet lang:en',
+        '"evaluating" OR "comparing" (software OR tool OR platform OR SaaS) -is:retweet lang:en',
     ],
     "market_trend": [
         '"x402" OR "MCP server" OR "agent economy" (launched OR building OR shipped) -is:retweet lang:en',
@@ -213,7 +218,7 @@ INTENT_KEYWORDS: dict[str, int] = {
     "open-source": 2,
 }
 
-# Listicle/guide patterns that indicate low-value content — penalize these
+# Listicle/guide patterns — penalize in scoring (-3)
 LISTICLE_PENALTIES: list[str] = [
     "top 5 ", "top 10 ", "top 20 ", "top 50 ",
     "best ", "complete guide", "how to ",
@@ -221,6 +226,62 @@ LISTICLE_PENALTIES: list[str] = [
     "leaderboard", "rankings", "tier list",
     "tips for ", "things to know",
 ]
+
+# Hard garbage filter — items matching these patterns get DROPPED entirely.
+# These are content types that look relevant by keyword but carry zero signal.
+# Applied to ALL categories before dedup and quality floor.
+GARBAGE_PATTERNS: list[str] = [
+    # Guides/playbooks/tutorials — about a topic, not an event
+    "playbook", "handbook", "beginner's guide", "starter guide",
+    "step-by-step", "complete breakdown", "ultimate guide",
+    "everything you need to know", "what you need to know",
+    "a guide to", "guide for", "introduction to",
+    # Aggregation/list content — no actionable signal
+    "options compared", "tools compared", "best options",
+    "best tools for", "best platforms", "best software",
+    "alternatives to consider", "tools to use in",
+    "top careers", "top jobs", "high-demand jobs",
+    "tools you should", "tools every",
+    # Cost/salary guides — not pricing events
+    "cost to hire", "salary guide", "compensation report",
+    "how much does it cost", "pricing comparison",
+    "complete breakdown by",
+    # Predictions/trend reports — opinion, not events
+    "what lies ahead", "what to expect in",
+    "predictions for", "trends to watch",
+    "future of", "state of", "outlook for",
+    # Courses/certifications
+    "free course", "certification", "bootcamp",
+    "learn how to", "masterclass",
+    # Strategy/framework docs
+    "talent strategy", "hiring strategy", "growth strategy",
+    "the 2026 guide", "the 2025 guide",
+]
+
+# Category-specific garbage patterns — items matching these in their category get dropped
+CATEGORY_GARBAGE: dict[str, list[str]] = {
+    "funding_signal": [
+        # Lists of funded companies, not individual funding events
+        "list of funded", "top funded", "most funded",
+        "funded startups", "funded companies",
+    ],
+    "hiring_signal": [
+        # Articles about hiring trends, not actual job openings
+        "hiring mindset", "hiring playbook", "hiring strategy",
+        "talent strategy", "workforce", "shaping the",
+        "skills gap", "labor market",
+        "guide to", "what employers want", "hiring funnel",
+    ],
+    "competitor_news": [
+        # Listicles of competitors, not competitor events
+        "best ai agents", "best ai tools", "best ai platforms",
+        "top ai companies",
+    ],
+    "pricing_intel": [
+        # Pricing comparison articles, not actual pricing changes
+        "options compared", "pricing comparison", "pricing guide",
+    ],
+}
 
 COMPANY_SIGNAL_KEYWORDS: dict[str, list[str]] = {
     "funding":      ["funding", "series a", "series b", "seed round", "raised", "investment"],
@@ -239,33 +300,182 @@ DEFAULT_SIGNAL_TYPE_BY_CATEGORY: dict[str, str] = {
     "hiring_signal": "hiring",
 }
 
+# ─── Lead Vertical Taxonomy ──────────────────────────────────────────────────
+# Tags each lead_signal item with the industry vertical the buyer is in.
+# Sales/lead-mgmt agents filter by vertical to find THEIR leads.
+# Two-pass tagging: X context_annotations first, keyword fallback second.
+
+# Map X context_annotation entity names → our vertical labels
+X_TOPIC_TO_VERTICAL: dict[str, str] = {
+    # Technology
+    "Technology": "devtools",
+    "Technology Business": "devtools",
+    "Computer programming": "devtools",
+    "Tech Personalities": "devtools",
+    "Artificial intelligence": "ai_ml",
+    "Machine Learning": "ai_ml",
+    "ChatGPT": "ai_ml",
+    "OpenAI": "ai_ml",
+    "Grok Ai": "ai_ml",
+    # Business & Finance
+    "Business & finance": "business",
+    "Financial Services Business": "fintech",
+    "Cryptocurrency": "web3",
+    "Bitcoin": "web3",
+    "Ethereum": "web3",
+    # Marketing & Sales
+    "Digital creator": "marketing",
+    "Content creation": "marketing",
+    "Brand": "marketing",
+    "Advertising": "marketing",
+    # E-commerce & Retail
+    "Retail industry": "ecommerce",
+    "E-Commerce": "ecommerce",
+    "Apparel/Accessories - Retail": "ecommerce",
+    # Design & Creative
+    "Design": "design",
+    "Graphic design": "design",
+    "UX Design": "design",
+    # Healthcare
+    "Healthcare": "healthcare",
+    "Medical": "healthcare",
+    # Education
+    "Education": "education",
+    "EdTech": "education",
+    # Real Estate
+    "Real Estate": "real_estate",
+    "Property": "real_estate",
+}
+
+# Keyword fallback: if no X topic matched, scan tweet text for vertical clues
+VERTICAL_KEYWORDS: dict[str, list[str]] = {
+    "hr": ["hiring", "recruit", "onboarding", "payroll", "hris", "ats", "talent",
+           "hr software", "applicant tracking", "people ops", "headcount"],
+    "sales": ["crm", "pipeline", "outreach", "cold email", "lead gen", "quota",
+              "sales tool", "prospecting", "hubspot", "salesforce", "close.com"],
+    "marketing": ["seo", "sem", "ads", "content marketing", "social media", "analytics",
+                  "attribution", "email marketing", "mailchimp", "convertkit"],
+    "devtools": ["api", "sdk", "github", "deploy", "ci/cd", "monitoring", "backend",
+                 "frontend", "developer tool", "dev tool", "hosting", "database"],
+    "ai_ml": ["ai agent", "llm", "machine learning", "model", "fine-tune", "embeddings",
+              "rag", "vector database", "chatbot", "gpt", "claude", "openai"],
+    "automation": ["n8n", "zapier", "make.com", "workflow", "automation", "no-code",
+                   "low-code", "airtable", "integromat"],
+    "design": ["figma", "design tool", "ui/ux", "prototype", "branding", "logo",
+               "canva", "creative", "designer"],
+    "ecommerce": ["shopify", "ecommerce", "e-commerce", "store", "inventory",
+                  "fulfillment", "cart", "woocommerce", "stripe"],
+    "fintech": ["payment", "fintech", "banking", "lending", "invoice", "billing",
+                "accounting", "stripe", "plaid", "neobank"],
+    "web3": ["blockchain", "smart contract", "web3", "crypto", "defi", "nft",
+             "token", "wallet", "solidity", "x402"],
+    "healthcare": ["healthcare", "medical", "health tech", "patient", "ehr",
+                   "telehealth", "hipaa", "clinical"],
+    "education": ["edtech", "learning", "course", "lms", "training",
+                  "education", "student", "tutor"],
+    "real_estate": ["real estate", "property", "rental", "tenant", "proptech",
+                    "listing", "mortgage"],
+    "pm_ops": ["project management", "task manager", "jira", "asana", "linear",
+               "notion", "monday.com", "ticketing", "helpdesk"],
+    "cybersecurity": ["security", "vulnerability", "pentest", "soc", "siem",
+                      "compliance", "audit", "encryption", "zero trust"],
+}
+
+
+def classify_lead_vertical(text: str, x_topics: list[str] | None = None) -> str:
+    """Tag a lead with its industry vertical. X topics first, keywords second."""
+    # Pass 1: X context_annotations (most reliable)
+    if x_topics:
+        for topic in x_topics:
+            vertical = X_TOPIC_TO_VERTICAL.get(topic)
+            if vertical:
+                return vertical
+
+    # Pass 2: keyword scan on tweet text
+    lower = text.lower()
+    best_vertical = "general"
+    best_hits = 0
+    for vertical, keywords in VERTICAL_KEYWORDS.items():
+        hits = sum(1 for kw in keywords if kw in lower)
+        if hits > best_hits:
+            best_hits = hits
+            best_vertical = vertical
+
+    return best_vertical if best_hits > 0 else "general"
+
+
 ENTITY_STOPWORDS = {
     "The", "This", "That", "We", "Our", "You", "Your", "A", "An", "And",
     "For", "From", "With", "Phase", "Agent", "AI", "MCP", "API", "New",
     "Today", "Breaking",
 }
 
-# Multi-word phrases that only appear in tech/business context.
-# Single words like "service", "product", "app" match everyday English — banned.
+# Phrases that indicate the tweet is about tech/business products/services.
+# Purpose: filter out tweets about "looking for a restaurant" or "need a ride"
+# Must be BROAD — our customers sell everything from HR tools to automation platforms.
 LEAD_TECH_PHRASES = [
-    "api", "sdk", "saas", "llm", "crm", "erp", "etl",  # acronyms are safe
+    # Acronyms (safe, rarely used outside tech/biz)
+    "api", "sdk", "saas", "llm", "crm", "erp", "etl", "hris", "ats",
+    "cms", "cdn", "seo", "sem", "roi", "kpi", "okr", "mrr", "arr",
+    # Software/platform categories
+    "software", "platform", "tool", "app", "dashboard", "plugin",
+    "integration", "automation", "workflow", "template",
+    # Product types that sales agents sell
     "data feed", "data source", "data pipeline", "data provider",
     "dev tool", "developer tool", "open source", "open-source",
-    "machine learning", "deep learning", "neural network",
     "cloud service", "web service", "microservice",
     "ai agent", "ai model", "ai tool", "ai platform",
-    "tech stack", "software engineer", "full stack", "backend",
-    "startup", "b2b", "series a", "series b", "seed round",
-    "github", "npm", "pypi", "docker", "kubernetes",
-    "vector database", "embeddings", "rag", "fine-tune",
-    "mcp", "x402", "blockchain", "smart contract", "web3",
     "no-code", "low-code", "workflow automation",
-    "pricing page", "free tier", "free trial", "self-hosted",
+    "chatbot", "voicebot", "voice agent",
+    # Business functions (HR, sales, marketing, ops)
+    "hr software", "recruiting tool", "payroll", "onboarding",
+    "sales tool", "lead gen", "cold email", "outreach",
+    "marketing tool", "analytics", "reporting",
+    "project management", "task manager", "helpdesk", "ticketing",
+    "accounting", "invoicing", "billing",
+    # Specific products/ecosystems people ask about
+    "n8n", "zapier", "make.com", "airtable", "notion",
+    "hubspot", "salesforce", "slack", "stripe", "shopify",
+    "github", "npm", "pypi", "docker", "kubernetes",
+    "postgres", "supabase", "firebase", "vercel", "netlify",
+    # Tech infrastructure
+    "tech stack", "backend", "frontend", "full stack",
+    "vector database", "embeddings", "rag", "fine-tune",
     "rest api", "graphql", "webhook", "endpoint",
-    "scraping", "enrichment", "intent data",
+    "hosting", "deployment", "ci/cd", "monitoring",
+    # Web3/fintech
+    "mcp", "x402", "blockchain", "smart contract", "web3",
+    "payment", "fintech", "neobank",
+    # Pricing/evaluation signals
+    "pricing page", "free tier", "free trial", "self-hosted",
+    "subscription", "per seat", "per user", "enterprise plan",
+    # General business
+    "startup", "b2b", "b2c", "agency", "freelancer", "consultant",
+    "vendor", "provider", "service provider",
 ]
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
+
+def is_garbage(item: dict[str, Any]) -> bool:
+    """Hard filter: returns True if item should be dropped entirely.
+    Checks universal garbage patterns + category-specific patterns.
+    Applied to ALL categories."""
+    title = (item.get("title") or "").lower()
+    text = (item.get("summary") or item.get("content_excerpt") or "").lower()
+    combined = f"{title} {text}"
+    category = item.get("category", "")
+
+    # Universal garbage patterns
+    if any(pattern in combined for pattern in GARBAGE_PATTERNS):
+        return True
+
+    # Category-specific garbage
+    cat_patterns = CATEGORY_GARBAGE.get(category, [])
+    if any(pattern in combined for pattern in cat_patterns):
+        return True
+
+    return False
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -846,7 +1056,7 @@ def search_x(
     items = []
     lead_quality_terms = [
         "need",
-        "looking",
+        "looking for",
         "recommend",
         "evaluating",
         "comparing",
@@ -854,7 +1064,72 @@ def search_x(
         "switching",
         "searching",
         "who sells",
-        "where to",
+        "where to find",
+        "anyone know",
+        "suggestions for",
+        "help me find",
+        "struggling to find",
+        "which one",
+        "should i use",
+    ]
+
+    # Seller/self-promo patterns — these people are SELLING, not BUYING
+    # A CEO saying "we launched our API" is not a lead, it's a competitor
+    seller_disqualifiers = [
+        "we launched",
+        "we built",
+        "we shipped",
+        "we released",
+        "our api",
+        "our platform",
+        "our tool",
+        "our sdk",
+        "my api",
+        "i built",
+        "i launched",
+        "i shipped",
+        "just launched",
+        "now live",
+        "check out",
+        "try our",
+        "announcing",
+        "introducing our",
+        "proud to",
+        "excited to announce",
+        "we're building",
+        "we are building",
+        "join our",
+        "sign up for",
+        "i'd recommend",
+        "grab your",
+        "get your free",
+        "available at",
+        "available on",
+        "download our",
+        "use our",
+        # Job posting / hiring announcements (not buying)
+        "exciting opportunity",
+        "is hiring", "we are hiring", "we're hiring", "hiring for",
+        "is looking for a remote",
+        "open position", "open role",
+        "apply now", "apply here", "apply today",
+        "job alert", "job opening",
+        # Service sellers ("I build X" / "if you need X")
+        "i create", "i develop", "i design", "i build",
+        "we create", "we develop", "we design",
+        "i can help you", "we can help you",
+        "i offer", "we offer", "offering a",
+        "if you're looking for", "if you are looking for",
+        "if you need a", "if you need an",
+        "dm me", "dm for", "book a call", "free consultation",
+        "hire me", "hire us",
+        "day 1:", "day 2:", "day 3:", "day 4:", "day 5:",  # coaching threads
+        # Negations
+        "not looking for",
+        "i am not looking",
+        "i'm not looking",
+        "don't need",
+        "no longer looking",
     ]
 
     for query in queries:
@@ -965,20 +1240,179 @@ def search_x(
                 signal["x_topics"] = topics[:5]  # keep top 5 topic annotations
 
             if category == "lead_signal":
-                lower_text = text.lower()
-                # Filter 1: must be about tech (multi-word phrases only)
+                # Normalize curly quotes to straight for consistent matching
+                lower_text = text.lower().replace("\u2019", "'").replace("\u2018", "'")
+                lower_bio = (author_bio.lower().replace("\u2019", "'").replace("\u2018", "'")
+                             if author_bio else "")
+                # Filter 1: reject sellers and self-promoters (check tweet + bio)
+                if any(phrase in lower_text for phrase in seller_disqualifiers):
+                    continue
+                # Also check bio for seller signals (freelancers advertising)
+                bio_seller_phrases = [
+                    "i build", "i create", "i design", "i develop",
+                    "we build", "we create", "hire me", "dm for",
+                    "book a call", "available for", "open to work",
+                ]
+                if any(phrase in lower_bio for phrase in bio_seller_phrases) and \
+                   any(phrase in lower_text for phrase in ["looking for", "need a", "need an"]):
+                    # Bio says seller + tweet uses "looking for" = likely bait
+                    continue
+                # Filter 2: must be about tech/business (not personal)
                 if not any(phrase in lower_text for phrase in LEAD_TECH_PHRASES):
                     continue
-                # Filter 2: low-score items need explicit buying language
+                # Filter 3: low-score items need explicit buying language
                 has_buying_phrase = any(term in lower_text for term in lead_quality_terms)
                 if int(signal.get("intent_score", 0) or 0) < 4 and not has_buying_phrase:
                     continue
+                # Filter 4: bot/spam detection
+                if author_followers < 5 and len(text) < 80:
+                    continue
+                # Filter 4b: gibberish detector — high ratio of nonsense words
+                words = lower_text.split()
+                if len(words) > 5:
+                    real_words = sum(1 for w in words if len(w) > 1 and w.isalpha())
+                    if real_words / len(words) < 0.5:
+                        continue  # too much gibberish
+                # Tag with industry vertical
+                signal["vertical"] = classify_lead_vertical(text, topics)
 
             items.append(signal)
 
         time.sleep(0.5)  # X rate limit respect
 
     return items
+
+
+# ─── LLM Classifier (OpenRouter) ──────────────────────────────────────────────
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+LLM_CLASSIFIER_MODEL = os.getenv("LLM_CLASSIFIER_MODEL", "openai/gpt-4o-mini")
+LLM_CLASSIFY_CATEGORIES = {"lead_signal", "hiring_signal"}
+
+LLM_PROMPTS: dict[str, str] = {
+    "lead_signal": (
+        "You are a buying-intent classifier for a B2B sales intelligence platform.\n"
+        "Determine if this social media post is from someone ACTIVELY LOOKING TO BUY "
+        "a product, service, tool, or solution.\n\n"
+        "ACCEPT: genuine questions asking for recommendations, evaluating options, "
+        "switching from one tool to another, expressing frustration with current tool, "
+        "comparing vendors, requesting proposals.\n\n"
+        "REJECT: someone selling/advertising their own product, job postings, "
+        "coaching/tips threads, political commentary, customer service complaints, "
+        "spam, gibberish, general opinions not related to purchasing.\n\n"
+        "Reply with ONLY a JSON object: {\"accept\": true/false, \"reason\": \"<10 words>\"}"
+    ),
+    "hiring_signal": (
+        "You are a hiring-event classifier for a business intelligence platform.\n"
+        "Determine if this content describes a SPECIFIC, REAL hiring event — "
+        "a company actively hiring or a concrete job opening.\n\n"
+        "ACCEPT: specific company hiring announcements, job postings with company names, "
+        "new VP/CTO/head-of appointments, team expansion news.\n\n"
+        "REJECT: career advice articles, hiring trend think-pieces, opinion columns about "
+        "the job market, generic 'future of work' content, salary guides, "
+        "interview tips, skills gap discussions.\n\n"
+        "Reply with ONLY a JSON object: {\"accept\": true/false, \"reason\": \"<10 words>\"}"
+    ),
+}
+
+
+def llm_classify_batch(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Second-pass LLM filter on lead_signal and hiring_signal items.
+    Sends each candidate to OpenRouter for binary accept/reject.
+    Items from other categories pass through unchanged.
+    Returns only accepted items (with llm_verdict metadata attached)."""
+
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY not set — skipping LLM classifier")
+        return items
+
+    accepted: list[dict[str, Any]] = []
+    llm_rejected = 0
+    llm_errors = 0
+
+    for item in items:
+        category = item.get("category", "")
+
+        # Pass through categories that don't need LLM classification
+        if category not in LLM_CLASSIFY_CATEGORIES:
+            accepted.append(item)
+            continue
+
+        # Build the content string for classification
+        title = item.get("title", "")
+        excerpt = item.get("content_excerpt") or item.get("summary") or ""
+        author_info = ""
+        author = item.get("author", {})
+        if author:
+            author_info = f" [posted by @{author.get('username', '?')}]"
+        content = f"{title} {excerpt}{author_info}".strip()[:500]
+
+        system_prompt = LLM_PROMPTS.get(category, "")
+        if not system_prompt:
+            accepted.append(item)
+            continue
+
+        reply = None
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": LLM_CLASSIFIER_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": content},
+                    ],
+                    "max_tokens": 60,
+                    "temperature": 0,
+                },
+                timeout=15,
+            )
+
+            if resp.status_code != 200:
+                logger.warning("LLM classifier error status=%s body=%s", resp.status_code, resp.text[:200])
+                llm_errors += 1
+                accepted.append(item)  # on error, keep the item (fail open)
+                continue
+
+            reply = resp.json()["choices"][0]["message"]["content"].strip()
+
+            # Parse JSON from reply (handle markdown code fences)
+            clean = reply.strip("`").strip()
+            if clean.startswith("json"):
+                clean = clean[4:].strip()
+            verdict = json.loads(clean)
+
+            if verdict.get("accept", True):
+                item["llm_verdict"] = {"accepted": True, "reason": verdict.get("reason", "")}
+                accepted.append(item)
+            else:
+                llm_rejected += 1
+                logger.debug(
+                    "LLM rejected [%s] %s — %s",
+                    category, title[:60], verdict.get("reason", "no reason"),
+                )
+
+            time.sleep(0.1)  # rate limit politeness
+
+        except (json.JSONDecodeError, KeyError, IndexError) as exc:
+            logger.warning("LLM classifier parse error: %s reply=%s", exc, reply[:200] if reply else "N/A")
+            llm_errors += 1
+            accepted.append(item)  # fail open
+        except Exception as exc:
+            logger.warning("LLM classifier request error: %s", exc)
+            llm_errors += 1
+            accepted.append(item)  # fail open
+
+    if llm_rejected:
+        logger.info("LLM classifier rejected %d items from %s", llm_rejected, LLM_CLASSIFY_CATEGORIES)
+    if llm_errors:
+        logger.warning("LLM classifier had %d errors (items kept on fail-open)", llm_errors)
+
+    return accepted
 
 
 # ─── Pipeline ─────────────────────────────────────────────────────────────────
@@ -1009,27 +1443,57 @@ def collect_signals(
     for category, queries in X_QUERIES.items():
         all_items.extend(search_x(category, queries))
 
-    # Deduplicate + quality floor (drop score < 2)
+    # Garbage filter → Deduplicate → Quality floor → Author dedup (X)
+    garbage_dropped = 0
+    score_dropped = 0
     deduped: list[dict[str, Any]] = []
-    dropped = 0
+    x_authors_per_category: dict[str, set[str]] = {}  # limit 1 tweet per author per category
+
     for item in all_items:
-        if item["id"] not in seen:
-            seen.add(item["id"])
-            if int(item.get("intent_score") or 0) < 2:
-                dropped += 1
-                continue
-            deduped.append(item)
-    if dropped:
-        logger.info("Quality floor dropped %d items with score < 2", dropped)
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+
+        # Hard garbage filter (guides, listicles, playbooks, etc.)
+        if is_garbage(item):
+            garbage_dropped += 1
+            continue
+
+        # Quality floor (score < 2)
+        if int(item.get("intent_score") or 0) < 2:
+            score_dropped += 1
+            continue
+
+        # Author dedup for X items: max 1 tweet per author per category
+        if item.get("source_engine") == "x":
+            author_username = (item.get("author") or {}).get("username", "")
+            if author_username:
+                cat = item.get("category", "")
+                key = cat
+                if key not in x_authors_per_category:
+                    x_authors_per_category[key] = set()
+                if author_username in x_authors_per_category[key]:
+                    continue  # already have a tweet from this author in this category
+                x_authors_per_category[key].add(author_username)
+
+        deduped.append(item)
+
+    if garbage_dropped:
+        logger.info("Garbage filter dropped %d items (guides/listicles/playbooks)", garbage_dropped)
+    if score_dropped:
+        logger.info("Quality floor dropped %d items with score < 2", score_dropped)
+
+    # LLM second-pass: classify lead_signal + hiring_signal candidates
+    classified = llm_classify_batch(deduped)
 
     # Sort: lead signals first, then by intent score desc
-    deduped.sort(key=lambda r: (
+    classified.sort(key=lambda r: (
         0 if r["category"] == "lead_signal" else 1,
         -int(r.get("intent_score") or 0),
         r.get("published_at") or "",
     ))
 
-    return deduped
+    return classified
 
 
 def build_feed_payload(run_date: str, items: list[dict[str, Any]]) -> dict[str, Any]:
