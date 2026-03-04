@@ -215,7 +215,7 @@ def score_intent(
     if source_engine in {"exa", "brave", "x"}:
         score += 1
     score += max(0, engagement_boost)
-    return max(10, min(score, 10))
+    return max(1, min(score, 10))
 
 
 def classify_company_signal(text: str) -> str:
