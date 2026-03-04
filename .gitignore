@@ -8,3 +8,6 @@ cowork_secrets.env
 data/
 HANDOFF.md
 .firecrawl/
+
+run_scraper.sh
+scripts/
