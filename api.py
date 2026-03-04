@@ -132,7 +132,7 @@ async def get_feed() -> dict[str, Any]:
 
 
 @app.get("/leads")
-async def get_leads(min_intent: int = Query(default=7, ge=1, le=10)) -> dict[str, Any]:
+async def get_leads(min_intent: int = Query(default=5, ge=1, le=10)) -> dict[str, Any]:
     feed, _ = load_latest_feed()
     leads = [
         item

@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -44,6 +45,13 @@ load_dotenv()
 
 X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "")
 X_HEADERS = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
+
+LOG_LEVEL = os.getenv("SCRAPER_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(levelname)s %(message)s",
+)
+logger = logging.getLogger("signalbase.scraper")
 
 
 # ─── Search Engine Routing ───────────────────────────────────────────────────
@@ -172,6 +180,11 @@ def classify_company_signal(text: str) -> str:
     return "general"
 
 
+def response_snippet(resp: requests.Response, limit: int = 220) -> str:
+    body = (resp.text or "").replace("\n", " ").strip()
+    return body[:limit]
+
+
 def build_signal_item(
     category: str,
     query: str,
@@ -261,7 +274,8 @@ def search_exa(
                     query, num_results=num_results,
                     start_published_date=since, text=True,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning("Exa query failed query=%r error=%s", query, exc)
                 continue
 
         raw = extract_value(response, "results") or []
@@ -319,11 +333,29 @@ def search_brave(
                 params={"q": query, "count": 8, "freshness": "pw"},  # pw = past week
                 timeout=15,
             )
-            r.raise_for_status()
-        except Exception:
+        except Exception as exc:
+            logger.warning("Brave request error query=%r error=%s", query, exc)
             continue
 
-        for result in r.json().get("web", {}).get("results", []):
+        if r.status_code != 200:
+            logger.warning(
+                "Brave query failed status=%s query=%r body=%s",
+                r.status_code,
+                query,
+                response_snippet(r),
+            )
+            continue
+
+        try:
+            results = r.json().get("web", {}).get("results", [])
+        except Exception as exc:
+            logger.warning("Brave JSON parse failed query=%r error=%s", query, exc)
+            continue
+
+        if not results:
+            logger.info("Brave query returned 0 results query=%r", query)
+
+        for result in results:
             url   = result.get("url", "")
             title = result.get("title", "")
             text  = result.get("description", "") or result.get("extra_snippets", [""])[0]
@@ -376,11 +408,29 @@ def search_x(
                 },
                 timeout=15,
             )
-            r.raise_for_status()
-        except Exception:
+        except Exception as exc:
+            logger.warning("X request error query=%r error=%s", query, exc)
             continue
 
-        for tweet in r.json().get("data", []):
+        if r.status_code != 200:
+            logger.warning(
+                "X query failed status=%s query=%r body=%s",
+                r.status_code,
+                query,
+                response_snippet(r),
+            )
+            continue
+
+        try:
+            tweets = r.json().get("data", [])
+        except Exception as exc:
+            logger.warning("X JSON parse failed query=%r error=%s", query, exc)
+            continue
+
+        if not tweets:
+            logger.info("X query returned 0 results query=%r", query)
+
+        for tweet in tweets:
             text = tweet.get("text", "")
             if not text or len(text) < 30:
                 continue
