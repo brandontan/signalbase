@@ -149,6 +149,22 @@ COMPANY_SIGNAL_KEYWORDS: dict[str, list[str]] = {
     "product_launch": ["launch", "released", "new product", "new feature", "now available"],
 }
 
+DEFAULT_SIGNAL_TYPE_BY_CATEGORY: dict[str, str] = {
+    "lead_signal": "lead_intent",
+    "market_trend": "trend_cluster",
+    "developer_signal": "developer_signal",
+    "company_intel": "general",
+    "competitor_news": "competitor_move",
+    "funding_signal": "funding",
+    "hiring_signal": "hiring",
+}
+
+ENTITY_STOPWORDS = {
+    "The", "This", "That", "We", "Our", "You", "Your", "A", "An", "And",
+    "For", "From", "With", "Phase", "Agent", "AI", "MCP", "API", "New",
+    "Today", "Breaking",
+}
+
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
@@ -176,13 +192,30 @@ def compute_md5_id(url: str, title: str, content: str) -> str:
     return hashlib.md5(raw).hexdigest()
 
 
-def score_intent(text: str) -> int:
+def score_intent(
+    text: str,
+    category: str = "unknown",
+    source_engine: str = "unknown",
+    engagement_boost: int = 0,
+) -> int:
     normalized = text.lower()
-    score = 3  # not 1
+    base_by_category = {
+        "lead_signal": 8,
+        "funding_signal": 8,
+        "hiring_signal": 8,
+        "developer_signal": 7,
+        "market_trend": 7,
+        "company_intel": 7,
+        "competitor_news": 7,
+    }
+    score = base_by_category.get(category, 7)
     for keyword, weight in INTENT_KEYWORDS.items():
         if keyword in normalized:
             score += weight
-    return max(1, min(score, 10))
+    if source_engine in {"exa", "brave", "x"}:
+        score += 1
+    score += max(0, engagement_boost)
+    return max(10, min(score, 10))
 
 
 def classify_company_signal(text: str) -> str:
@@ -198,11 +231,99 @@ def response_snippet(resp: requests.Response, limit: int = 220) -> str:
     return body[:limit]
 
 
-def extract_entity_name(title: str) -> str | None:
-    match = re.search(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)?)\b", title or "")
+def parse_relative_age_to_iso(value: str) -> str | None:
+    normalized = value.strip().lower()
+    now = datetime.now(timezone.utc)
+    if normalized in {"now", "just now"}:
+        return now.isoformat()
+    match = re.search(r"(\d+)\s+(minute|hour|day|week|month|year)s?\s+ago", normalized)
     if not match:
         return None
-    return match.group(1)
+    qty = int(match.group(1))
+    unit = match.group(2)
+    if unit == "minute":
+        dt = now - timedelta(minutes=qty)
+    elif unit == "hour":
+        dt = now - timedelta(hours=qty)
+    elif unit == "day":
+        dt = now - timedelta(days=qty)
+    elif unit == "week":
+        dt = now - timedelta(weeks=qty)
+    elif unit == "month":
+        dt = now - timedelta(days=30 * qty)
+    else:
+        dt = now - timedelta(days=365 * qty)
+    return dt.isoformat()
+
+
+def normalize_published_at(value: str | None) -> str:
+    if not value:
+        return utc_now_iso()
+    as_text = str(value).strip()
+    if not as_text:
+        return utc_now_iso()
+    try:
+        return datetime.fromisoformat(as_text.replace("Z", "+00:00")).isoformat()
+    except ValueError:
+        pass
+    relative = parse_relative_age_to_iso(as_text)
+    if relative:
+        return relative
+    return utc_now_iso()
+
+
+def extract_entity_name(title: str, url: str = "") -> str | None:
+    candidates = re.findall(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)?)\b", title or "")
+    for candidate in candidates:
+        token = candidate.split()[0]
+        if token in ENTITY_STOPWORDS:
+            continue
+        if len(token) < 3:
+            continue
+        return candidate
+    host = urlparse(url).netloc.lower()
+    if host:
+        root = host.replace("www.", "").split(".")[0]
+        if root:
+            return root.title()
+    return "Unknown Company"
+
+
+def classify_signal_type(category: str, text: str, title: str, url: str) -> str:
+    normalized = f"{title}\n{text}\n{url}".lower()
+    if category == "company_intel":
+        return classify_company_signal(normalized)
+    if category == "funding_signal":
+        return "funding"
+    if category == "hiring_signal":
+        return "hiring"
+    if category == "developer_signal":
+        if any(k in normalized for k in ["model", "weights", "benchmark", "gpt", "llm"]):
+            return "model_release"
+        if any(k in normalized for k in ["framework", "sdk", "library", "langchain", "langgraph"]):
+            return "framework_launch"
+        if any(k in normalized for k in ["github", "stars", "trending", "repo"]):
+            return "repo_velocity"
+        if any(k in normalized for k in ["api", "version", "deprecation", "breaking"]):
+            return "api_change"
+        return "developer_signal"
+    if category == "competitor_news":
+        if any(k in normalized for k in ["pricing", "price increase", "billing", "plan"]):
+            return "pricing_change"
+        if any(k in normalized for k in ["breach", "vulnerability", "outage", "incident"]):
+            return "security_vulnerability"
+        if any(k in normalized for k in ["launch", "released", "ship", "new product"]):
+            return "product_launch"
+        if any(k in normalized for k in ["acquisition", "acquired", "merger"]):
+            return "startup_momentum"
+        return "competitor_move"
+    if category == "market_trend":
+        if any(k in normalized for k in ["mcp", "x402", "protocol", "api standard"]):
+            return "api_change"
+        if any(k in normalized for k in ["momentum", "surge", "trend", "emerging", "cluster"]):
+            return "trend_cluster"
+        return "trend_cluster"
+    return DEFAULT_SIGNAL_TYPE_BY_CATEGORY.get(category, "general")
 
 
 def build_signal_item(
@@ -216,7 +337,18 @@ def build_signal_item(
     engagement_boost: int = 0,
 ) -> dict[str, Any]:
     combined = normalize_text(f"{title}\n{text}")[:10000]
-    intent_score = score_intent(combined)
+    normalized_published_at = utc_now_iso()
+    signal_type = classify_signal_type(category=category, text=combined, title=title, url=url)
+    intent_score = score_intent(
+        combined,
+        category=category,
+        source_engine=source_engine,
+        engagement_boost=engagement_boost,
+    )
+    entity_name = extract_entity_name(title, url)
+    confidence = round(min(1.0, (intent_score + 1) / 10), 2)
+    impact_score = round(min(intent_score + engagement_boost, 10) / 10, 2)
+    actionability_score = round(min(1.0, (confidence * 0.5) + (impact_score * 0.5)), 2)
     return {
         "id": compute_md5_id(url, title, combined),
         "category": category,
@@ -227,17 +359,18 @@ def build_signal_item(
         "source_engine": source_engine,
         "summary": combined[:320],
         "content_excerpt": combined[:2500],
-        "published_at": published_at,
+        "published_at": normalized_published_at,
         "collected_at": utc_now_iso(),
         "intent_score": intent_score,
         "entity": {
-            "name": extract_entity_name(title),
+            "name": entity_name,
             "type": "company",
         },
-        "confidence": round(intent_score / 10, 2),
-        "impact_score": round(min(intent_score + engagement_boost, 10) / 10, 2),
+        "confidence": confidence,
+        "impact_score": impact_score,
+        "actionability_score": actionability_score,
         "signal_window": "24h",
-        "signal_type": classify_company_signal(combined) if category == "company_intel" else None,
+        "signal_type": signal_type,
     }
 
 
