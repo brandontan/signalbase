@@ -11,3 +11,8 @@ HANDOFF.md
 
 run_scraper.sh
 scripts/
+
+.github/
+scraper.py
+requirements.txt
+.env.example
