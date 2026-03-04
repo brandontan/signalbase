@@ -198,19 +198,19 @@ def score_intent(
 ) -> int:
     normalized = text.lower()
     base_by_category = {
-        "lead_signal": 8,
-        "funding_signal": 8,
-        "hiring_signal": 8,
-        "developer_signal": 7,
-        "market_trend": 7,
-        "company_intel": 7,
-        "competitor_news": 7,
+        "lead_signal": 2,
+        "funding_signal": 2,
+        "hiring_signal": 2,
+        "developer_signal": 1,
+        "market_trend": 1,
+        "company_intel": 1,
+        "competitor_news": 1,
     }
     score = base_by_category.get(category, 7)
     for keyword, weight in INTENT_KEYWORDS.items():
         if keyword in normalized:
             score += weight
-    if source_engine in {"exa", "brave", "x"}:
+    if source_engine == "x":
         score += 1
     score += max(0, engagement_boost)
     return max(1, min(score, 10))
