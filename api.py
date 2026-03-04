@@ -197,6 +197,7 @@ BIG_CATEGORY_RULES: dict[str, dict[str, Any]] = {
     "protocol_signal": {
         "source_categories": ["market_trend"],
         "keywords": ["x402", "mcp", "agent economy", "autonomous agent", "agentic", "marketplace"],
+        "min_intent_score": 4,
     },
     # Planned categories with placeholder preview routes; no in-feed rules yet.
     "web_search_intel": {
@@ -418,7 +419,14 @@ def filter_big_category(feed: dict[str, Any], category_id: str) -> list[dict[str
             if any(keyword in item_text_blob(item) for keyword in keywords)
         ]
         if by_keywords:
-            return by_keywords
+            by_signal_type = by_keywords
+
+    min_score = config.get("min_intent_score")
+    if min_score is not None:
+        by_signal_type = [
+            item for item in by_signal_type
+            if int(item.get("intent_score") or 0) >= min_score
+        ]
 
     return by_signal_type
 
