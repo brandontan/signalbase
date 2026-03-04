@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -68,6 +69,10 @@ EXA_QUERIES: dict[str, list[str]] = {
         "x402 protocol HTTP micropayments AI agent economy 2026",
         "MCP server marketplace agent-to-agent data transactions emerging",
     ],
+    "developer_signal": [
+        "new AI model released open weights developer tools 2026",
+        "agent framework trending GitHub launch open source 2026",
+    ],
 }
 
 # BRAVE: keyword news search — best for recent news, announcements, factual events
@@ -84,6 +89,14 @@ BRAVE_QUERIES: dict[str, list[str]] = {
         "agent tooling platform acquisition merger 2026",
         "AI API provider outage migration alternative 2026",
         "LLM data provider new competitor launch 2026",
+    ],
+    "funding_signal": [
+        "AI startup raised seed series funding announced 2026",
+        "machine learning company investment round closed 2026",
+    ],
+    "hiring_signal": [
+        "AI company hiring engineers expanding team 2026",
+        "LLM agent infrastructure team new roles 2026",
     ],
 }
 
@@ -185,6 +198,13 @@ def response_snippet(resp: requests.Response, limit: int = 220) -> str:
     return body[:limit]
 
 
+def extract_entity_name(title: str) -> str | None:
+    match = re.search(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)?)\b", title or "")
+    if not match:
+        return None
+    return match.group(1)
+
+
 def build_signal_item(
     category: str,
     query: str,
@@ -193,8 +213,10 @@ def build_signal_item(
     text: str,
     published_at: str | None = None,
     source_engine: str = "unknown",
+    engagement_boost: int = 0,
 ) -> dict[str, Any]:
     combined = normalize_text(f"{title}\n{text}")[:10000]
+    intent_score = score_intent(combined)
     return {
         "id": compute_md5_id(url, title, combined),
         "category": category,
@@ -207,7 +229,14 @@ def build_signal_item(
         "content_excerpt": combined[:2500],
         "published_at": published_at,
         "collected_at": utc_now_iso(),
-        "intent_score": score_intent(combined),
+        "intent_score": intent_score,
+        "entity": {
+            "name": extract_entity_name(title),
+            "type": "company",
+        },
+        "confidence": round(intent_score / 10, 2),
+        "impact_score": round(min(intent_score + engagement_boost, 10) / 10, 2),
+        "signal_window": "24h",
         "signal_type": classify_company_signal(combined) if category == "company_intel" else None,
     }
 
@@ -441,6 +470,9 @@ def search_x(
 
             metrics = tweet.get("public_metrics", {})
             tweet_url = f"https://x.com/i/web/status/{tweet['id']}"
+            likes = int(metrics.get("like_count", 0) or 0)
+            retweets = int(metrics.get("retweet_count", 0) or 0)
+            engagement_boost = 1 if (likes + retweets > 5) else 0
 
             signal = build_signal_item(
                 category=category,
@@ -450,12 +482,8 @@ def search_x(
                 text=text,
                 published_at=tweet.get("created_at"),
                 source_engine="x",
+                engagement_boost=engagement_boost,
             )
-            # Boost intent score for tweets with engagement
-            likes = metrics.get("like_count", 0)
-            retweets = metrics.get("retweet_count", 0)
-            if likes + retweets > 5:
-                signal["intent_score"] = min(10, signal["intent_score"] + 1)
 
             items.append(signal)
 
