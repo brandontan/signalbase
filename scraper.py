@@ -44,6 +44,9 @@ except ImportError:
 
 load_dotenv(override=True)
 
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
+
 X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "")
 X_HEADERS = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
 
@@ -687,8 +690,7 @@ def build_feed_payload(run_date: str, items: list[dict[str, Any]]) -> dict[str, 
 
 
 def save_feed(run_date: str, payload: dict[str, Any]) -> Path:
-    root = Path(__file__).resolve().parent
-    out_path = root / "data" / run_date / "feed.json"
+    out_path = DATA_DIR / run_date / "feed.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)

@@ -17,7 +17,7 @@ from x402.server import x402ResourceServer
 load_dotenv(override=True)
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 PAY_TO_ADDRESS = os.getenv("PAY_TO_ADDRESS", "").strip() or ZERO_ADDRESS
