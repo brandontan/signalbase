@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -8,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption
 from x402.http.facilitator_client_base import CreateHeadersAuthProvider
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
@@ -26,6 +29,7 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 PAY_TO_ADDRESS = os.getenv("PAY_TO_ADDRESS", "").strip() or ZERO_ADDRESS
 X402_NETWORK = os.getenv("X402_NETWORK", "eip155:8453").strip()
+IS_PRODUCTION = os.getenv("RAILWAY_ENVIRONMENT_NAME", "").strip().lower() == "production"
 
 # CDP facilitator auth (Coinbase Developer Platform)
 CDP_API_KEY_ID = os.getenv("CDP_API_KEY_ID", "").strip()
@@ -199,6 +203,9 @@ app = FastAPI(
     title="Signalbase API",
     version="0.1.0",
     description="Paid web intelligence feed for AI agents using x402 USDC payments.",
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
 
 app.add_middleware(
@@ -274,6 +281,46 @@ app.add_middleware(
     routes=PAID_ROUTES,
     server=resource_server,
 )
+
+
+def decode_payment_required_header(value: str) -> dict[str, Any] | None:
+    try:
+        padded = value + ("=" * (-len(value) % 4))
+        decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+        payload = json.loads(decoded)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        return None
+    return None
+
+
+class PaymentInstructionBodyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if response.status_code != 402:
+            return response
+
+        payment_required_header = response.headers.get("payment-required")
+        decoded = (
+            decode_payment_required_header(payment_required_header)
+            if payment_required_header
+            else None
+        )
+
+        payload: dict[str, Any] = {
+            "error": "payment_required",
+            "message": "Payment required. Retry with a valid x402 payment payload.",
+        }
+        if decoded is not None:
+            payload["payment_required"] = decoded
+
+        headers = dict(response.headers)
+        headers.pop("content-length", None)
+        return JSONResponse(status_code=402, content=payload, headers=headers)
+
+
+app.add_middleware(PaymentInstructionBodyMiddleware)
 
 
 def list_feed_paths() -> list[Path]:
@@ -632,8 +679,19 @@ async def get_preview_category(
 
 
 @app.post("/cron/scrape")
-async def trigger_scrape(secret: str = Query(...)) -> dict[str, Any]:
-    if not CRON_SECRET or secret != CRON_SECRET:
+async def trigger_scrape(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    if not CRON_SECRET:
+        raise HTTPException(status_code=503, detail="CRON_SECRET not configured")
+
+    token = None
+    if authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value.strip():
+            token = value.strip()
+
+    if token != CRON_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
     def run_scraper():
@@ -655,7 +713,10 @@ async def get_health() -> dict[str, Any]:
         feed, path = load_latest_feed()
         latest_feed_date = feed.get("date")
         generated_at = feed.get("generated_at")
-        latest_path = str(path)
+        try:
+            latest_path = str(path.relative_to(DATA_DIR))
+        except ValueError:
+            latest_path = path.name
     except HTTPException:
         pass
 
