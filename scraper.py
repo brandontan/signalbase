@@ -42,7 +42,7 @@ try:
 except ImportError:
     from firecrawl import FirecrawlApp as Firecrawl  # type: ignore
 
-load_dotenv()
+load_dotenv(override=True)
 
 X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "")
 X_HEADERS = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}

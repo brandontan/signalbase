@@ -14,7 +14,7 @@ from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.server import x402ResourceServer
 
-load_dotenv()
+load_dotenv(override=True)
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
