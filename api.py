@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -23,6 +24,7 @@ from x402.server import x402ResourceServer
 
 _is_railway = bool(os.getenv("RAILWAY_ENVIRONMENT_NAME", ""))
 load_dotenv(override=not _is_railway)  # Never override Railway env vars
+logger = logging.getLogger("signalbase.api")
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
@@ -344,10 +346,20 @@ def load_latest_feed() -> tuple[dict[str, Any], Path]:
             status_code=404,
             detail="No feed found. Run `python scraper.py` to generate daily data.",
         )
-    feed_path = candidates[0]
-    with feed_path.open("r", encoding="utf-8") as fh:
-        payload = json.load(fh)
-    return payload, feed_path
+    for feed_path in candidates:
+        try:
+            with feed_path.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            if not isinstance(payload, dict):
+                raise ValueError("feed payload is not a JSON object")
+            return payload, feed_path
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Skipping unreadable feed file %s: %s", feed_path, exc)
+            continue
+    raise HTTPException(
+        status_code=503,
+        detail="Latest feed is being updated. Retry shortly.",
+    )
 
 
 def filter_category(feed: dict[str, Any], category: str) -> list[dict[str, Any]]:
@@ -687,6 +699,14 @@ async def get_preview_category(
 
 
 _scraper_lock = threading.Lock()
+_scraper_status_lock = threading.Lock()
+_scraper_status: dict[str, Any] = {
+    "running": False,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_exit_code": None,
+    "last_error": None,
+}
 
 
 @app.post("/cron/scrape")
@@ -706,18 +726,65 @@ async def trigger_scrape(
         raise HTTPException(status_code=403, detail="Invalid secret")
 
     if not _scraper_lock.acquire(blocking=False):
-        return {"status": "already_running", "message": "Scraper is already in progress"}
+        with _scraper_status_lock:
+            running_since = _scraper_status.get("last_started_at")
+        return {
+            "status": "already_running",
+            "message": "Scraper is already in progress",
+            "running_since": running_since,
+        }
+
+    started_at = utc_now_iso()
+    with _scraper_status_lock:
+        _scraper_status.update(
+            {
+                "running": True,
+                "last_started_at": started_at,
+                "last_error": None,
+            }
+        )
 
     def run_scraper():
         try:
-            subprocess.run(["python3", "scraper.py"], cwd=str(ROOT))
+            proc = subprocess.run(
+                ["python3", "scraper.py"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+            )
+            stderr_tail = (proc.stderr or "").strip()[-500:]
+            with _scraper_status_lock:
+                _scraper_status.update(
+                    {
+                        "running": False,
+                        "last_finished_at": utc_now_iso(),
+                        "last_exit_code": proc.returncode,
+                        "last_error": stderr_tail if proc.returncode != 0 else None,
+                    }
+                )
+            if proc.returncode != 0:
+                logger.error("Cron scraper failed with exit code %s: %s", proc.returncode, stderr_tail)
         finally:
+            with _scraper_status_lock:
+                if _scraper_status.get("running"):
+                    _scraper_status.update(
+                        {
+                            "running": False,
+                            "last_finished_at": utc_now_iso(),
+                            "last_exit_code": 1,
+                            "last_error": _scraper_status.get("last_error") or "scraper terminated unexpectedly",
+                        }
+                    )
             _scraper_lock.release()
 
     thread = threading.Thread(target=run_scraper, daemon=True)
     thread.start()
 
-    return {"status": "scraper_started", "message": "Scraper running in background"}
+    return {
+        "status": "scraper_started",
+        "message": "Scraper running in background",
+        "started_at": started_at,
+    }
 
 
 @app.get("/health")
@@ -736,6 +803,9 @@ async def get_health() -> dict[str, Any]:
             latest_path = path.name
     except HTTPException:
         pass
+
+    with _scraper_status_lock:
+        scraper_status = dict(_scraper_status)
 
     preview_endpoints = [
         "/preview",
@@ -762,4 +832,5 @@ async def get_health() -> dict[str, Any]:
             "latest_feed_path": latest_path,
             "available_feeds": len(list_feed_paths()),
         },
+        "scraper": scraper_status,
     }

@@ -20,7 +20,9 @@ jobs:
             exit 1
           fi
 
-          response=$(curl -sS -w "\n%{http_code}" -X POST "$SCRAPE_URL?secret=$CRON_SECRET")
+          response=$(curl -sS -w "\n%{http_code}" -X POST \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$SCRAPE_URL")
           body=$(echo "$response" | sed '$d')
           status=$(echo "$response" | tail -n1)
 

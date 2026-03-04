@@ -1525,8 +1525,12 @@ def build_feed_payload(run_date: str, items: list[dict[str, Any]]) -> dict[str, 
 def save_feed(run_date: str, payload: dict[str, Any]) -> Path:
     out_path = DATA_DIR / run_date / "feed.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as fh:
+    tmp_path = out_path.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, out_path)
     return out_path
 
 
