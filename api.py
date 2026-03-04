@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption
+from x402.http.facilitator_client_base import CreateHeadersAuthProvider
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
 from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
@@ -24,12 +25,29 @@ CRON_SECRET = os.getenv("CRON_SECRET", "").strip()
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 PAY_TO_ADDRESS = os.getenv("PAY_TO_ADDRESS", "").strip() or ZERO_ADDRESS
-X402_NETWORK = os.getenv("X402_NETWORK", "eip155:84532").strip()
-_raw_facilitator_url = os.getenv("FACILITATOR_URL", "").strip()
-if not _raw_facilitator_url or "api.x402.org" in _raw_facilitator_url:
-    FACILITATOR_URL = "https://x402.org/facilitator"
+X402_NETWORK = os.getenv("X402_NETWORK", "eip155:8453").strip()
+
+# CDP facilitator auth (Coinbase Developer Platform)
+CDP_API_KEY_ID = os.getenv("CDP_API_KEY_ID", "").strip()
+CDP_API_KEY_SECRET = os.getenv("CDP_API_KEY_SECRET", "").strip()
+
+if CDP_API_KEY_ID and CDP_API_KEY_SECRET:
+    # Use Coinbase CDP facilitator with auth (supports Base mainnet)
+    from cdp.x402 import create_facilitator_config as _create_cdp_config
+    _cdp_config = _create_cdp_config(
+        api_key_id=CDP_API_KEY_ID,
+        api_key_secret=CDP_API_KEY_SECRET,
+    )
+    FACILITATOR_URL = _cdp_config["url"]
+    _FACILITATOR_AUTH = CreateHeadersAuthProvider(_cdp_config["create_headers"])
 else:
-    FACILITATOR_URL = _raw_facilitator_url
+    # Fallback: unauthenticated facilitator (testnet only)
+    _raw_facilitator_url = os.getenv("FACILITATOR_URL", "").strip()
+    if not _raw_facilitator_url or "api.x402.org" in _raw_facilitator_url:
+        FACILITATOR_URL = "https://x402.org/facilitator"
+    else:
+        FACILITATOR_URL = _raw_facilitator_url
+    _FACILITATOR_AUTH = None
 
 PRICING: dict[str, str] = {
     "GET /feed": "$0.01",
@@ -244,7 +262,10 @@ PAID_ROUTES: dict[str, RouteConfig] = {
     ),
 }
 
-facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=FACILITATOR_URL))
+facilitator = HTTPFacilitatorClient(FacilitatorConfig(
+    url=FACILITATOR_URL,
+    auth_provider=_FACILITATOR_AUTH,
+))
 resource_server = x402ResourceServer(facilitator)
 resource_server.register(X402_NETWORK, ExactEvmServerScheme())
 

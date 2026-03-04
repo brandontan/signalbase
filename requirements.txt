@@ -3,5 +3,6 @@ uvicorn[standard]
 exa-py
 firecrawl-py
 x402[fastapi,evm]
+cdp-sdk
 python-dotenv
 requests
