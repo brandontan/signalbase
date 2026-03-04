@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ load_dotenv(override=True)
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
+CRON_SECRET = os.getenv("CRON_SECRET", "").strip()
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 PAY_TO_ADDRESS = os.getenv("PAY_TO_ADDRESS", "").strip() or ZERO_ADDRESS
@@ -605,6 +608,20 @@ async def get_preview_category(
         "preview_endpoint": f"/preview/category/{category_id}",
     }
     return preview_response(feed=feed, category=category_id, items=items, limit=limit, extra=extra)
+
+
+@app.post("/cron/scrape")
+async def trigger_scrape(secret: str = Query(...)) -> dict[str, Any]:
+    if not CRON_SECRET or secret != CRON_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid secret")
+
+    def run_scraper():
+        subprocess.run(["python3", "scraper.py"], cwd=str(ROOT))
+
+    thread = threading.Thread(target=run_scraper, daemon=True)
+    thread.start()
+
+    return {"status": "scraper_started", "message": "Scraper running in background"}
 
 
 @app.get("/health")
