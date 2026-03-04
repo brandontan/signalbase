@@ -103,8 +103,10 @@ BRAVE_QUERIES: dict[str, list[str]] = {
 # Best for catching buying intent the moment someone expresses it publicly
 X_QUERIES: dict[str, list[str]] = {
     "lead_signal": [
-        '"need a data API" OR "need data feed" OR "looking for data" agent -is:retweet lang:en',
-        '"who sells" OR "where to buy" (data OR signals OR intelligence) agent AI -is:retweet lang:en',
+        '"need an API" OR "need a data" OR "looking for an API" OR "looking for a data" context:131.848920371311001600 -is:retweet lang:en',
+        '"recommend" (API OR SaaS OR SDK OR tool) context:131.848920371311001600 -is:retweet lang:en',
+        '"sell to AI" OR "sell to agents" OR "API for agents" OR "data for agents" -is:retweet lang:en',
+        '"integrate" OR "integration" (API OR data OR agent) context:131.848920371311001600 -is:retweet lang:en',
     ],
     "market_trend": [
         '"x402" OR "MCP server" OR "agent economy" (launched OR building OR shipped) -is:retweet lang:en',
@@ -116,9 +118,13 @@ X_QUERIES: dict[str, list[str]] = {
 INTENT_KEYWORDS: dict[str, int] = {
     "looking for": 3,
     "anyone recommend": 4,
+    "anyone know": 4,
+    "can someone recommend": 4,
     "need a": 2,
     "building an agent": 4,
     "building agents": 4,
+    "searching for": 3,
+    "where to find": 3,
     "data source": 3,
     "real-time data": 3,
     "integrate": 2,
@@ -127,8 +133,16 @@ INTENT_KEYWORDS: dict[str, int] = {
     "api for": 3,
     "switching from": 4,
     "alternative to": 4,
+    "comparing": 3,
     "too expensive": 3,
     "evaluating": 3,
+    "vendor": 2,
+    "data provider": 3,
+    "who provides": 3,
+    "pricing page": 2,
+    "free trial": 2,
+    "demo": 2,
+    "onboarding": 2,
     "we're hiring": 2,
     "just raised": 4,
     "series a": 4,
@@ -164,6 +178,25 @@ ENTITY_STOPWORDS = {
     "Today", "Breaking",
 }
 
+# Multi-word phrases that only appear in tech/business context.
+# Single words like "service", "product", "app" match everyday English — banned.
+LEAD_TECH_PHRASES = [
+    "api", "sdk", "saas", "llm", "crm", "erp", "etl",  # acronyms are safe
+    "data feed", "data source", "data pipeline", "data provider",
+    "dev tool", "developer tool", "open source", "open-source",
+    "machine learning", "deep learning", "neural network",
+    "cloud service", "web service", "microservice",
+    "ai agent", "ai model", "ai tool", "ai platform",
+    "tech stack", "software engineer", "full stack", "backend",
+    "startup", "b2b", "series a", "series b", "seed round",
+    "github", "npm", "pypi", "docker", "kubernetes",
+    "vector database", "embeddings", "rag", "fine-tune",
+    "mcp", "x402", "blockchain", "smart contract", "web3",
+    "no-code", "low-code", "workflow automation",
+    "pricing page", "free tier", "free trial", "self-hosted",
+    "rest api", "graphql", "webhook", "endpoint",
+    "scraping", "enrichment", "intent data",
+]
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
@@ -216,6 +249,9 @@ def score_intent(
     if source_engine == "x":
         score += 1
     score += max(0, engagement_boost)
+    # Lead signals with engagement are higher quality (others noticed the need too)
+    if category == "lead_signal" and engagement_boost >= 2:
+        score += 1
     return max(1, min(score, 10))
 
 
@@ -558,6 +594,18 @@ def search_x(
     No Firecrawl needed — tweet text IS the signal.
     """
     items = []
+    lead_quality_terms = [
+        "need",
+        "looking",
+        "recommend",
+        "evaluating",
+        "comparing",
+        "alternative",
+        "switching",
+        "searching",
+        "who sells",
+        "where to",
+    ]
 
     for query in queries:
         try:
@@ -618,6 +666,16 @@ def search_x(
                 source_engine="x",
                 engagement_boost=engagement_boost,
             )
+
+            if category == "lead_signal":
+                lower_text = text.lower()
+                # Filter 1: must be about tech (multi-word phrases only)
+                if not any(phrase in lower_text for phrase in LEAD_TECH_PHRASES):
+                    continue
+                # Filter 2: low-score items need explicit buying language
+                has_buying_phrase = any(term in lower_text for term in lead_quality_terms)
+                if int(signal.get("intent_score", 0) or 0) < 4 and not has_buying_phrase:
+                    continue
 
             items.append(signal)
 
