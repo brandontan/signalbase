@@ -6,9 +6,5 @@ __pycache__/
 .DS_Store
 .agent/
 data/
-requirements.txt
-scraper.py
 HANDOFF.md
 .firecrawl/
-node_modules/
-dist/
