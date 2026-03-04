@@ -53,12 +53,12 @@ X_HEADERS = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
 # Best for intent queries where concept matters more than exact words
 EXA_QUERIES: dict[str, list[str]] = {
     "lead_signal": [
-        "people evaluating switching away from their current B2B software tool",
-        "founders frustrated want to replace expensive SaaS subscription looking for alternative",
+        "teams building AI agents need real-time data feed for autonomous workflows",
+        "developer integrating external data source into LLM agent pipeline",
     ],
     "market_trend": [
-        "AI agent infrastructure MCP x402 autonomous agent economy emerging 2026",
-        "agent-native tools developer adoption data access API marketplace",
+        "x402 protocol HTTP micropayments AI agent economy 2026",
+        "MCP server marketplace agent-to-agent data transactions emerging",
     ],
 }
 
@@ -66,16 +66,16 @@ EXA_QUERIES: dict[str, list[str]] = {
 # Cheaper than Exa for keyword searches, fresher for news
 BRAVE_QUERIES: dict[str, list[str]] = {
     "company_intel": [
-        "AI startup raises series funding round 2026",
-        "SaaS company hiring growth engineering 2026",
-        "software company pricing change restructure announcement",
-        "new AI product launch developer tools 2026",
+        "AI agent startup funding round raised 2026",
+        "autonomous agent platform launch developer tools 2026",
+        "agentic AI company hiring engineers 2026",
+        "AI infrastructure startup new product release 2026",
     ],
     "competitor_news": [
-        "SaaS company acquired merger AI tooling 2026",
-        "software platform pricing increase customers reaction",
-        "AI infrastructure tool launch competitor announcement",
-        "SaaS outage users migrating alternative 2026",
+        "AI data API pricing change developer reaction 2026",
+        "agent tooling platform acquisition merger 2026",
+        "AI API provider outage migration alternative 2026",
+        "LLM data provider new competitor launch 2026",
     ],
 }
 
@@ -83,33 +83,42 @@ BRAVE_QUERIES: dict[str, list[str]] = {
 # Best for catching buying intent the moment someone expresses it publicly
 X_QUERIES: dict[str, list[str]] = {
     "lead_signal": [
-        '"looking for" OR "anyone recommend" ("AI tool" OR "SaaS" OR "data API") -is:retweet lang:en',
-        '"switching from" OR "migrating from" OR "replacing" ("HubSpot" OR "Salesforce" OR "SaaS") -is:retweet lang:en',
+        '"building an agent" OR "building agents" ("need data" OR "data source" OR "real-time") -is:retweet lang:en',
+        '"AI agent" ("looking for" OR "anyone know" OR "recommend") data API -is:retweet lang:en',
     ],
     "market_trend": [
-        '"MCP server" OR "x402" OR "agent economy" startup building launched -is:retweet lang:en',
-        '"AI agents" ("buy" OR "pay for" OR "data access") infrastructure -is:retweet lang:en',
+        '"x402" OR "MCP server" OR "agent economy" (launched OR building OR shipped) -is:retweet lang:en',
+        '"agentic" OR "autonomous agent" (infrastructure OR data OR API) 2026 -is:retweet lang:en',
     ],
 }
 
 # Intent scoring weights — higher = stronger buying signal
 INTENT_KEYWORDS: dict[str, int] = {
     "looking for": 3,
+    "anyone recommend": 4,
+    "need a": 2,
+    "building an agent": 4,
+    "building agents": 4,
+    "data source": 3,
+    "real-time data": 3,
+    "integrate": 2,
+    "pipeline": 2,
+    "feed": 2,
+    "api for": 3,
     "switching from": 4,
-    "migrating": 3,
-    "replacing": 3,
     "alternative to": 4,
-    "recommendation": 2,
-    "frustrated": 2,
-    "need": 1,
-    "evaluate": 2,
-    "rfp": 4,
-    "budget": 2,
-    "buy": 2,
-    "purchase": 2,
-    "vendor": 2,
     "too expensive": 3,
-    "cancel": 3,
+    "evaluating": 3,
+    "we're hiring": 2,
+    "just raised": 4,
+    "series a": 4,
+    "series b": 4,
+    "seed round": 4,
+    "launched": 2,
+    "shipped": 2,
+    "new product": 2,
+    "acquired": 3,
+    "pricing change": 3,
 }
 
 COMPANY_SIGNAL_KEYWORDS: dict[str, list[str]] = {
@@ -148,7 +157,7 @@ def compute_md5_id(url: str, title: str, content: str) -> str:
 
 def score_intent(text: str) -> int:
     normalized = text.lower()
-    score = 1
+    score = 3  # not 1
     for keyword, weight in INTENT_KEYWORDS.items():
         if keyword in normalized:
             score += weight
@@ -307,7 +316,7 @@ def search_brave(
                     "Accept-Encoding": "gzip",
                     "X-Subscription-Token": brave_key,
                 },
-                params={"q": query, "count": 5, "freshness": "pd"},  # pd = past day
+                params={"q": query, "count": 8, "freshness": "pw"},  # pw = past week
                 timeout=15,
             )
             r.raise_for_status()
