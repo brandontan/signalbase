@@ -335,7 +335,7 @@ def build_signal_item(
     engagement_boost: int = 0,
 ) -> dict[str, Any]:
     combined = normalize_text(f"{title}\n{text}")[:10000]
-    normalized_published_at = utc_now_iso()
+    normalized_published_at = normalize_published_at(published_at)
     signal_type = classify_signal_type(category=category, text=combined, title=title, url=url)
     intent_score = score_intent(
         combined,
