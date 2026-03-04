@@ -1,0 +1,32 @@
+name: Daily Signalbase Scrape
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  trigger-scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger Railway cron endpoint
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SCRAPE_URL: https://signalbase-production.up.railway.app/cron/scrape
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "CRON_SECRET is not set"
+            exit 1
+          fi
+
+          response=$(curl -sS -w "\n%{http_code}" -X POST "$SCRAPE_URL?secret=$CRON_SECRET")
+          body=$(echo "$response" | sed '$d')
+          status=$(echo "$response" | tail -n1)
+
+          echo "HTTP status: $status"
+          echo "Response: $body"
+
+          if [ "$status" -ne 200 ]; then
+            exit 1
+          fi
